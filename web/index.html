@@ -1,0 +1,430 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI API Info</title>
+    <style>
+        :root {
+            --bg: #0d1117; --surface: #161b22; --border: #30363d;
+            --text: #e6edf3; --text-muted: #8b949e;
+            --accent: #58a6ff; --green: #3fb950; --yellow: #d29922;
+            --red: #f85149; --purple: #bc8cff; --orange: #f0883e;
+        }
+        * { margin:0; padding:0; box-sizing:border-box; }
+        body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif; background:var(--bg); color:var(--text); line-height:1.6; }
+        .container { max-width:1280px; margin:0 auto; padding:20px; }
+
+        /* Header */
+        header { text-align:center; padding:40px 0 24px; border-bottom:1px solid var(--border); margin-bottom:24px; position:relative; }
+        header h1 { font-size:2.2em; background:linear-gradient(135deg,var(--accent),var(--purple)); -webkit-background-clip:text; -webkit-text-fill-color:transparent; margin-bottom:6px; }
+        header .subtitle { color:var(--text-muted); font-size:1.05em; }
+
+        /* Lang Toggle */
+        .lang-toggle { position:absolute; top:20px; right:0; display:flex; gap:4px; }
+        .lang-btn { padding:6px 14px; background:var(--surface); border:1px solid var(--border); border-radius:6px; color:var(--text-muted); cursor:pointer; font-size:0.85em; transition:all .2s; }
+        .lang-btn:hover { border-color:var(--accent); color:var(--text); }
+        .lang-btn.active { border-color:var(--accent); color:var(--accent); background:rgba(88,166,255,.1); }
+
+        .meta-bar { display:flex; justify-content:center; gap:20px; margin-top:14px; flex-wrap:wrap; }
+        .meta-item { background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:6px 14px; font-size:.88em; }
+        .meta-item span { color:var(--accent); font-weight:600; }
+
+        /* Stats */
+        .stats-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:14px; margin-bottom:28px; }
+        .stat-card { background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:18px; text-align:center; }
+        .stat-card .number { font-size:1.9em; font-weight:700; color:var(--accent); }
+        .stat-card .label { color:var(--text-muted); font-size:.82em; margin-top:2px; }
+
+        /* Section */
+        .section-title { font-size:1.35em; margin-bottom:14px; display:flex; align-items:center; gap:8px; }
+
+        /* Benchmark */
+        .benchmark-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(340px,1fr)); gap:14px; margin-bottom:28px; }
+        .benchmark-card { background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:18px; }
+        .benchmark-card h3 { margin-bottom:10px; font-size:1.05em; }
+        .price-bar { display:flex; align-items:center; margin-bottom:6px; gap:8px; }
+        .price-bar .bar-label { width:110px; font-size:.82em; color:var(--text-muted); text-align:right; flex-shrink:0; }
+        .price-bar .bar { flex:1; height:22px; border-radius:4px; position:relative; }
+        .price-bar .bar-fill { height:100%; border-radius:4px; display:flex; align-items:center; padding-left:8px; font-size:.72em; font-weight:600; min-width:fit-content; transition:width .5s; }
+        .bar-fill.cheapest { background:rgba(63,185,80,.3); color:var(--green); }
+        .bar-fill.mid { background:rgba(210,153,34,.3); color:var(--yellow); }
+        .bar-fill.expensive { background:rgba(248,81,73,.3); color:var(--red); }
+
+        /* Controls */
+        .controls { display:flex; gap:10px; margin-bottom:20px; flex-wrap:wrap; align-items:center; }
+        .search-box { flex:1; min-width:200px; padding:9px 14px; background:var(--surface); border:1px solid var(--border); border-radius:8px; color:var(--text); font-size:.95em; outline:none; transition:border-color .2s; }
+        .search-box:focus { border-color:var(--accent); }
+        .filter-btn { padding:7px 14px; background:var(--surface); border:1px solid var(--border); border-radius:8px; color:var(--text-muted); cursor:pointer; font-size:.85em; transition:all .2s; }
+        .filter-btn:hover { border-color:var(--accent); color:var(--text); }
+        .filter-btn.active { border-color:var(--accent); color:var(--accent); background:rgba(88,166,255,.1); }
+
+        /* Table */
+        .table-wrapper { overflow-x:auto; border-radius:12px; border:1px solid var(--border); margin-bottom:28px; }
+        table { width:100%; border-collapse:collapse; font-size:.88em; }
+        thead th { background:var(--surface); padding:10px 14px; text-align:left; font-weight:600; color:var(--text-muted); border-bottom:1px solid var(--border); cursor:pointer; user-select:none; white-space:nowrap; }
+        thead th:hover { color:var(--accent); }
+        thead th.sorted { color:var(--accent); }
+        thead th .sort-arrow { font-size:.8em; margin-left:3px; }
+        tbody tr { border-bottom:1px solid var(--border); transition:background .15s; }
+        tbody tr:hover { background:rgba(88,166,255,.05); }
+        tbody td { padding:8px 14px; white-space:nowrap; }
+
+        .provider-badge { display:inline-block; padding:2px 9px; border-radius:12px; font-size:.78em; font-weight:600; }
+        .provider-openrouter { background:rgba(88,166,255,.15); color:var(--accent); }
+        .provider-together_ai { background:rgba(63,185,80,.15); color:var(--green); }
+        .provider-groq { background:rgba(210,153,34,.15); color:var(--yellow); }
+        .provider-siliconflow { background:rgba(188,140,255,.15); color:var(--purple); }
+        .provider-ohmygpt { background:rgba(248,81,73,.15); color:var(--red); }
+
+        .price { font-family:'SF Mono','Fira Code',monospace; }
+        .price-cheap { color:var(--green); }
+        .price-mid { color:var(--yellow); }
+        .price-expensive { color:var(--red); }
+        .price-free { color:var(--green); font-weight:700; }
+
+        .latency { font-family:'SF Mono','Fira Code',monospace; font-size:.85em; }
+        .latency-fast { color:var(--green); }
+        .latency-mid { color:var(--yellow); }
+        .latency-slow { color:var(--red); }
+        .latency-na { color:var(--text-muted); }
+
+        .uptime { font-size:.82em; }
+        .uptime-good { color:var(--green); }
+        .uptime-warn { color:var(--yellow); }
+        .uptime-bad { color:var(--red); }
+
+        .model-name { font-weight:600; max-width:280px; overflow:hidden; text-overflow:ellipsis; }
+        .context-badge { font-size:.82em; color:var(--text-muted); }
+
+        footer { text-align:center; padding:28px 0; border-top:1px solid var(--border); color:var(--text-muted); font-size:.82em; }
+        footer a { color:var(--accent); text-decoration:none; }
+
+        .loading { text-align:center; padding:50px; color:var(--text-muted); }
+        .spinner { display:inline-block; width:36px; height:36px; border:3px solid var(--border); border-top-color:var(--accent); border-radius:50%; animation:spin .8s linear infinite; }
+        @keyframes spin { to { transform:rotate(360deg); } }
+
+        @media (max-width:768px) {
+            header h1 { font-size:1.5em; }
+            .controls { flex-direction:column; }
+            .lang-toggle { position:static; justify-content:center; margin-bottom:12px; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <div class="lang-toggle">
+                <button class="lang-btn active" onclick="setLang('zh')">中文</button>
+                <button class="lang-btn" onclick="setLang('en')">English</button>
+            </div>
+            <h1>⚡ AI API Info</h1>
+            <p class="subtitle" data-i18n="subtitle"></p>
+            <div class="meta-bar">
+                <div class="meta-item">📡 <span data-i18n="updated"></span> <span id="update-time">--</span></div>
+                <div class="meta-item">🤖 <span data-i18n="totalModels"></span> <span id="total-models">--</span></div>
+                <div class="meta-item">🏢 <span data-i18n="totalProviders"></span> <span id="total-providers">--</span></div>
+            </div>
+        </header>
+
+        <div class="stats-grid" id="stats-grid"></div>
+
+        <h2 class="section-title" data-i18n="benchmarkTitle"></h2>
+        <div class="benchmark-grid" id="benchmark-grid">
+            <div class="loading"><div class="spinner"></div></div>
+        </div>
+
+        <h2 class="section-title" data-i18n="tableTitle"></h2>
+        <div class="controls">
+            <input type="text" class="search-box" id="search" data-i18n-placeholder="searchPlaceholder">
+            <div id="provider-filters"></div>
+        </div>
+
+        <div class="table-wrapper">
+            <table id="price-table">
+                <thead>
+                    <tr>
+                        <th data-sort="model_name" data-i18n="colModel">Model <span class="sort-arrow"></span></th>
+                        <th data-sort="provider" data-i18n="colProvider">Provider <span class="sort-arrow"></span></th>
+                        <th data-sort="input_price_per_mtok" data-i18n="colInput">Input $/M <span class="sort-arrow"></span></th>
+                        <th data-sort="output_price_per_mtok" data-i18n="colOutput">Output $/M <span class="sort-arrow"></span></th>
+                        <th data-sort="latency_ms" data-i18n="colLatency">Latency <span class="sort-arrow"></span></th>
+                        <th data-sort="uptime_pct" data-i18n="colUptime">Uptime <span class="sort-arrow"></span></th>
+                        <th data-sort="context_length" data-i18n="colContext">Context <span class="sort-arrow"></span></th>
+                    </tr>
+                </thead>
+                <tbody id="table-body">
+                    <tr><td colspan="7" class="loading"><div class="spinner"></div></td></tr>
+                </tbody>
+            </table>
+        </div>
+
+        <footer>
+            <p data-i18n="footerLine1"></p>
+            <p data-i18n="footerLine2"></p>
+        </footer>
+    </div>
+
+<script>
+// ============================================================
+// i18n
+// ============================================================
+const I18N = {
+    zh: {
+        subtitle: 'AI API 聚合器实时比价 · 延迟监测 · 稳定性追踪',
+        updated: '数据更新:',
+        totalModels: '模型总数:',
+        totalProviders: '平台数量:',
+        benchmarkTitle: '🏆 热门模型跨平台价格对比',
+        tableTitle: '📋 全部模型价格表',
+        searchPlaceholder: '🔍 搜索模型名称... (例: claude, gpt, deepseek)',
+        colModel: '模型', colProvider: '平台',
+        colInput: 'Input $/M', colOutput: 'Output $/M',
+        colLatency: '延迟', colUptime: '可用率', colContext: '上下文',
+        statModels: '模型总数', statProviders: '聚合平台',
+        statFree: '免费模型', statCheapest: '最便宜付费模型',
+        statLatencyAvg: '平均延迟',
+        footerLine1: 'AI API Info — 开源 AI API 聚合器比价平台',
+        footerLine2: '数据定时自动采集',
+        na: '暂无',
+    },
+    en: {
+        subtitle: 'Real-time AI API Aggregator Pricing · Latency · Uptime',
+        updated: 'Updated:',
+        totalModels: 'Models:',
+        totalProviders: 'Providers:',
+        benchmarkTitle: '🏆 Popular Models Cross-Platform Comparison',
+        tableTitle: '📋 All Model Pricing',
+        searchPlaceholder: '🔍 Search models... (e.g. claude, gpt, deepseek)',
+        colModel: 'Model', colProvider: 'Provider',
+        colInput: 'Input $/M', colOutput: 'Output $/M',
+        colLatency: 'Latency', colUptime: 'Uptime', colContext: 'Context',
+        statModels: 'Total Models', statProviders: 'Providers',
+        statFree: 'Free Models', statCheapest: 'Cheapest Paid Model',
+        statLatencyAvg: 'Avg Latency',
+        footerLine1: 'AI API Info — Open-source AI API Aggregator Comparison',
+        footerLine2: 'Data collected automatically on schedule',
+        na: 'N/A',
+    }
+};
+
+let currentLang = localStorage.getItem('lang') || 'zh';
+
+function t(key) { return I18N[currentLang]?.[key] || I18N.en[key] || key; }
+
+function setLang(lang) {
+    currentLang = lang;
+    localStorage.setItem('lang', lang);
+    document.querySelectorAll('.lang-btn').forEach(b => b.classList.toggle('active', b.textContent.trim() === (lang === 'zh' ? '中文' : 'English')));
+    document.documentElement.lang = lang === 'zh' ? 'zh-CN' : 'en';
+    applyI18n();
+    renderAll();
+}
+
+function applyI18n() {
+    document.querySelectorAll('[data-i18n]').forEach(el => {
+        const key = el.dataset.i18n;
+        const arrow = el.querySelector('.sort-arrow');
+        const arrowText = arrow ? arrow.textContent : '';
+        el.textContent = t(key);
+        if (arrow) { const newArrow = document.createElement('span'); newArrow.className = 'sort-arrow'; newArrow.textContent = arrowText; el.appendChild(newArrow); }
+    });
+    document.querySelectorAll('[data-i18n-placeholder]').forEach(el => {
+        el.placeholder = t(el.dataset.i18nPlaceholder);
+    });
+}
+
+// ============================================================
+// Data & State
+// ============================================================
+let allModels = [];
+let filteredModels = [];
+let activeProviders = new Set();
+let sortColumn = 'input_price_per_mtok';
+let sortAsc = true;
+
+const BENCHMARK = [
+    { name: 'Claude Sonnet 4', key: 'claude-sonnet-4' },
+    { name: 'Claude Opus 4', key: 'claude-opus-4' },
+    { name: 'GPT-4o', key: 'gpt-4o' },
+    { name: 'GPT-4.1', key: 'gpt-4.1' },
+    { name: 'Gemini 2.5 Pro', key: 'gemini-2.5-pro' },
+    { name: 'Gemini 2.5 Flash', key: 'gemini-2.5-flash' },
+    { name: 'DeepSeek R1', key: 'deepseek-r1' },
+    { name: 'DeepSeek V3', key: 'deepseek-v3' },
+    { name: 'Llama 3.1 405B', key: 'llama-3.1-405b' },
+];
+
+const PROVIDER_COLORS = {
+    openrouter: 'provider-openrouter',
+    together_ai: 'provider-together_ai',
+    groq: 'provider-groq',
+    siliconflow: 'provider-siliconflow',
+    ohmygpt: 'provider-ohmygpt',
+};
+
+// ============================================================
+// Load
+// ============================================================
+async function loadData() {
+    try {
+        const resp = await fetch('./data/latest_prices.json');
+        const data = await resp.json();
+        allModels = data.models || [];
+        document.getElementById('update-time').textContent = new Date(data.timestamp).toLocaleString(currentLang === 'zh' ? 'zh-CN' : 'en-US');
+        document.getElementById('total-models').textContent = allModels.length;
+        const providers = [...new Set(allModels.map(m => m.provider))];
+        document.getElementById('total-providers').textContent = providers.length;
+        activeProviders = new Set(providers);
+        renderProviderFilters(providers);
+        renderAll();
+    } catch (e) {
+        document.getElementById('benchmark-grid').innerHTML = '<p style="color:var(--red);text-align:center;padding:40px;">❌ Failed to load data</p>';
+    }
+}
+
+function renderAll() {
+    const providers = [...new Set(allModels.map(m => m.provider))];
+    renderStats(providers);
+    renderBenchmarks();
+    applyFilters();
+}
+
+// ============================================================
+// Stats
+// ============================================================
+function renderStats(providers) {
+    const grid = document.getElementById('stats-grid');
+    const paid = allModels.filter(m => m.input_price_per_mtok > 0);
+    const cheapest = [...paid].sort((a,b) => a.input_price_per_mtok - b.input_price_per_mtok)[0];
+    const freeCount = allModels.filter(m => m.input_price_per_mtok === 0 && m.output_price_per_mtok === 0).length;
+    const withLatency = allModels.filter(m => m.latency_ms != null);
+    const avgLat = withLatency.length ? Math.round(withLatency.reduce((s,m) => s + m.latency_ms, 0) / withLatency.length) : null;
+
+    grid.innerHTML = `
+        <div class="stat-card"><div class="number">${allModels.length}</div><div class="label">${t('statModels')}</div></div>
+        <div class="stat-card"><div class="number">${providers.length}</div><div class="label">${t('statProviders')}</div></div>
+        <div class="stat-card"><div class="number">${freeCount}</div><div class="label">${t('statFree')}</div></div>
+        <div class="stat-card"><div class="number" style="font-size:1.1em">${cheapest ? cheapest.model_name.split('/').pop().substring(0,20) : '-'}</div><div class="label">${t('statCheapest')} ($${cheapest ? cheapest.input_price_per_mtok.toFixed(2) : '-'}/M)</div></div>
+        <div class="stat-card"><div class="number">${avgLat ? avgLat + 'ms' : '--'}</div><div class="label">${t('statLatencyAvg')}</div></div>
+    `;
+}
+
+// ============================================================
+// Provider Filters
+// ============================================================
+function renderProviderFilters(providers) {
+    document.getElementById('provider-filters').innerHTML = providers.map(p =>
+        `<button class="filter-btn active" data-provider="${p}" onclick="toggleProvider('${p}',this)">${p}</button>`
+    ).join('');
+}
+
+function toggleProvider(p, btn) {
+    activeProviders.has(p) ? (activeProviders.delete(p), btn.classList.remove('active')) : (activeProviders.add(p), btn.classList.add('active'));
+    applyFilters();
+}
+
+// ============================================================
+// Benchmarks
+// ============================================================
+function renderBenchmarks() {
+    const grid = document.getElementById('benchmark-grid');
+    let html = '';
+    for (const bm of BENCHMARK) {
+        const matches = allModels.filter(m => {
+            const id = m.model_id.toLowerCase(), key = bm.key.toLowerCase();
+            return id.includes(key) && !id.includes(key + '-mini') && !id.includes(key + '-nano');
+        });
+        if (!matches.length) continue;
+        const byProv = {};
+        for (const m of matches) if (!byProv[m.provider] || m.input_price_per_mtok < byProv[m.provider].input_price_per_mtok) byProv[m.provider] = m;
+        const unique = Object.values(byProv).sort((a,b) => a.input_price_per_mtok - b.input_price_per_mtok);
+        const maxP = Math.max(...unique.map(m => m.input_price_per_mtok), 1);
+        let bars = '';
+        unique.forEach((m, i) => {
+            const pct = Math.max((m.input_price_per_mtok / maxP) * 100, 18);
+            const cls = i === 0 ? 'cheapest' : i < unique.length - 1 ? 'mid' : 'expensive';
+            const latStr = m.latency_ms != null ? ` · ${m.latency_ms}ms` : '';
+            bars += `<div class="price-bar"><div class="bar-label">${m.provider}</div><div class="bar"><div class="bar-fill ${cls}" style="width:${pct}%">$${m.input_price_per_mtok.toFixed(2)} / $${m.output_price_per_mtok.toFixed(2)}${latStr}</div></div></div>`;
+        });
+        html += `<div class="benchmark-card"><h3>🔹 ${bm.name}</h3>${bars}</div>`;
+    }
+    grid.innerHTML = html || `<p style="text-align:center;color:var(--text-muted);">${t('na')}</p>`;
+}
+
+// ============================================================
+// Table
+// ============================================================
+function applyFilters() {
+    const q = document.getElementById('search').value.toLowerCase();
+    filteredModels = allModels.filter(m => {
+        if (!activeProviders.has(m.provider)) return false;
+        if (q && !m.model_id.toLowerCase().includes(q) && !m.model_name.toLowerCase().includes(q)) return false;
+        return true;
+    });
+    sortAndRender();
+}
+
+function sortAndRender() {
+    filteredModels.sort((a,b) => {
+        let va = a[sortColumn] ?? (sortAsc ? Infinity : -Infinity);
+        let vb = b[sortColumn] ?? (sortAsc ? Infinity : -Infinity);
+        if (typeof va === 'string') va = va.toLowerCase();
+        if (typeof vb === 'string') vb = vb.toLowerCase();
+        return sortAsc ? (va < vb ? -1 : va > vb ? 1 : 0) : (va > vb ? -1 : va < vb ? 1 : 0);
+    });
+    renderTable();
+}
+
+function renderTable() {
+    const tbody = document.getElementById('table-body');
+    if (!filteredModels.length) {
+        tbody.innerHTML = `<tr><td colspan="7" style="text-align:center;padding:40px;color:var(--text-muted);">No results</td></tr>`;
+        return;
+    }
+    const show = filteredModels.slice(0, 200);
+    tbody.innerHTML = show.map(m => {
+        const provCls = PROVIDER_COLORS[m.provider] || '';
+        return `<tr>
+            <td class="model-name" title="${m.model_id}">${m.model_name || m.model_id}</td>
+            <td><span class="provider-badge ${provCls}">${m.provider}</span></td>
+            <td class="price ${priceClass(m.input_price_per_mtok)}">${fmtPrice(m.input_price_per_mtok)}</td>
+            <td class="price ${priceClass(m.output_price_per_mtok)}">${fmtPrice(m.output_price_per_mtok)}</td>
+            <td class="latency ${latClass(m.latency_ms)}">${fmtLatency(m.latency_ms)}</td>
+            <td class="uptime ${uptimeClass(m.uptime_pct)}">${fmtUptime(m.uptime_pct)}</td>
+            <td class="context-badge">${fmtCtx(m.context_length)}</td>
+        </tr>`;
+    }).join('');
+    if (filteredModels.length > 200) {
+        tbody.innerHTML += `<tr><td colspan="7" style="text-align:center;color:var(--text-muted);padding:10px;">Showing 200 of ${filteredModels.length}</td></tr>`;
+    }
+}
+
+function priceClass(p) { return p === 0 ? 'price-free' : p < 1 ? 'price-cheap' : p < 10 ? 'price-mid' : 'price-expensive'; }
+function fmtPrice(p) { return p === 0 ? 'FREE' : '$' + p.toFixed(2); }
+function latClass(ms) { return ms == null ? 'latency-na' : ms < 500 ? 'latency-fast' : ms < 2000 ? 'latency-mid' : 'latency-slow'; }
+function fmtLatency(ms) { return ms == null ? '--' : ms < 1000 ? ms + 'ms' : (ms/1000).toFixed(1) + 's'; }
+function uptimeClass(u) { return u == null ? '' : u >= 99 ? 'uptime-good' : u >= 95 ? 'uptime-warn' : 'uptime-bad'; }
+function fmtUptime(u) { return u == null ? '--' : u.toFixed(1) + '%'; }
+function fmtCtx(len) { return !len ? '-' : len >= 1e6 ? (len/1e6).toFixed(1)+'M' : len >= 1000 ? Math.round(len/1000)+'K' : len; }
+
+// Sort
+document.querySelectorAll('thead th[data-sort]').forEach(th => {
+    th.addEventListener('click', () => {
+        const col = th.dataset.sort;
+        if (sortColumn === col) sortAsc = !sortAsc; else { sortColumn = col; sortAsc = true; }
+        document.querySelectorAll('thead th').forEach(t => t.classList.remove('sorted'));
+        th.classList.add('sorted');
+        th.querySelector('.sort-arrow').textContent = sortAsc ? '↑' : '↓';
+        sortAndRender();
+    });
+});
+
+document.getElementById('search').addEventListener('input', applyFilters);
+
+// Init
+applyI18n();
+loadData();
+</script>
+</body>
+</html>

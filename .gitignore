@@ -1,0 +1,7 @@
+data/prices.db
+data/latest_prices.json
+data/latest_report.md
+*.png
+__pycache__/
+*.pyc
+.env
