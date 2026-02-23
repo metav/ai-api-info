@@ -17,6 +17,12 @@ except ImportError:
     print("请先安装 requests: pip install requests")
     exit(1)
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).parent.parent / ".env")
+except ImportError:
+    pass
+
 # ============================================================
 # 配置
 # ============================================================
