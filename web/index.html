@@ -150,7 +150,8 @@
             <input type="text" class="search-box" id="search" data-i18n-placeholder="searchPlaceholder">
             <div id="provider-filters"></div>
         </div>
-        <div class="type-filters" id="type-filters"></div>
+        <!-- type-filters hidden: text-only mode for now -->
+        <div class="type-filters" id="type-filters" style="display:none"></div>
 
         <div class="table-wrapper">
             <table id="price-table">
@@ -158,7 +159,6 @@
                     <tr>
                         <th data-sort="model_name" data-i18n="colModel">Model <span class="sort-arrow"></span></th>
                         <th data-sort="provider" data-i18n="colProvider">Provider <span class="sort-arrow"></span></th>
-                        <th data-sort="model_type" data-i18n="colType">Type <span class="sort-arrow"></span></th>
                         <th data-sort="input_price_per_mtok" data-i18n="colInput">Input $/M <span class="sort-arrow"></span></th>
                         <th data-sort="output_price_per_mtok" data-i18n="colOutput">Output $/M <span class="sort-arrow"></span></th>
                         <th data-sort="latency_ms" data-i18n="colLatency">Latency <span class="sort-arrow"></span></th>
@@ -167,7 +167,7 @@
                     </tr>
                 </thead>
                 <tbody id="table-body">
-                    <tr><td colspan="8" class="loading"><div class="spinner"></div></td></tr>
+                    <tr><td colspan="7" class="loading"><div class="spinner"></div></td></tr>
                 </tbody>
             </table>
         </div>
@@ -195,7 +195,7 @@ const I18N = {
         colInput: 'Input $/M', colOutput: 'Output $/M',
         colLatency: '延迟', colUptime: '可用率', colContext: '上下文',
         statModels: '模型总数', statProviders: '聚合平台',
-        statFree: '免费模型', statCheapest: '最便宜付费(文本)',
+        statFree: '免费模型', statCheapest: '最便宜付费模型',
         statLatencyAvg: '平均延迟', statTypes: '模型类型',
         typeAll: '全部', typeText: '文本', typeTextVision: '视觉',
         typeImageGen: '图像生成', typeVideoGen: '视频生成',
@@ -217,7 +217,7 @@ const I18N = {
         colInput: 'Input $/M', colOutput: 'Output $/M',
         colLatency: 'Latency', colUptime: 'Uptime', colContext: 'Context',
         statModels: 'Total Models', statProviders: 'Providers',
-        statFree: 'Free Models', statCheapest: 'Cheapest Paid (Text)',
+        statFree: 'Free Models', statCheapest: 'Cheapest Paid Model',
         statLatencyAvg: 'Avg Latency', statTypes: 'Model Types',
         typeAll: 'All', typeText: 'Text', typeTextVision: 'Vision',
         typeImageGen: 'Image', typeVideoGen: 'Video',
@@ -309,7 +309,9 @@ async function loadData() {
     try {
         const resp = await fetch('./data/latest_prices.json');
         const data = await resp.json();
-        allModels = (data.models || []).map(m => ({
+        // Text-only mode: filter to text and text-vision models (multi-modal support coming later)
+        const TEXT_TYPES = new Set(['text', 'text-vision']);
+        allModels = (data.models || []).filter(m => TEXT_TYPES.has(m.model_type || 'text')).map(m => ({
             ...m,
             model_type: m.model_type || 'text',
             price_unit: m.price_unit || 'per_mtok',
@@ -323,7 +325,6 @@ async function loadData() {
         const types = [...new Set(allModels.map(m => m.model_type))];
         activeTypes = new Set(types);
         renderProviderFilters(providers);
-        renderTypeFilters(types);
         renderAll();
     } catch (e) {
         document.getElementById('benchmark-grid').innerHTML = '<p style="color:var(--red);text-align:center;padding:40px;">❌ Failed to load data</p>';
@@ -332,10 +333,8 @@ async function loadData() {
 
 function renderAll() {
     const providers = [...new Set(allModels.map(m => m.provider))];
-    const types = [...new Set(allModels.map(m => m.model_type))];
     renderStats(providers);
     renderBenchmarks();
-    renderTypeFilters(types);
     applyFilters();
 }
 
@@ -344,18 +343,15 @@ function renderAll() {
 // ============================================================
 function renderStats(providers) {
     const grid = document.getElementById('stats-grid');
-    const textModels = allModels.filter(m => m.model_type === 'text' || m.model_type === 'text-vision');
-    const paid = textModels.filter(m => m.input_price_per_mtok > 0);
+    const paid = allModels.filter(m => m.input_price_per_mtok > 0);
     const cheapest = [...paid].sort((a,b) => a.input_price_per_mtok - b.input_price_per_mtok)[0];
-    const freeCount = allModels.filter(m => m.input_price_per_mtok === 0 && m.output_price_per_mtok === 0 && (m.price_per_unit == null || m.price_per_unit === 0)).length;
+    const freeCount = allModels.filter(m => m.input_price_per_mtok === 0 && m.output_price_per_mtok === 0).length;
     const withLatency = allModels.filter(m => m.latency_ms != null);
     const avgLat = withLatency.length ? Math.round(withLatency.reduce((s,m) => s + m.latency_ms, 0) / withLatency.length) : null;
-    const typeCount = new Set(allModels.map(m => m.model_type)).size;
 
     grid.innerHTML = `
         <div class="stat-card"><div class="number">${allModels.length}</div><div class="label">${t('statModels')}</div></div>
         <div class="stat-card"><div class="number">${providers.length}</div><div class="label">${t('statProviders')}</div></div>
-        <div class="stat-card"><div class="number">${typeCount}</div><div class="label">${t('statTypes')}</div></div>
         <div class="stat-card"><div class="number">${freeCount}</div><div class="label">${t('statFree')}</div></div>
         <div class="stat-card"><div class="number" style="font-size:1.1em">${cheapest ? cheapest.model_name.split('/').pop().substring(0,20) : '-'}</div><div class="label">${t('statCheapest')} ($${cheapest ? cheapest.input_price_per_mtok.toFixed(2) : '-'}/M)</div></div>
         <div class="stat-card"><div class="number">${avgLat ? avgLat + 'ms' : '--'}</div><div class="label">${t('statLatencyAvg')}</div></div>
@@ -423,9 +419,8 @@ function toggleAllTypes(btn) {
 function renderBenchmarks() {
     const grid = document.getElementById('benchmark-grid');
     let html = '';
-    const textModels = allModels.filter(m => m.model_type === 'text' || m.model_type === 'text-vision');
     for (const bm of BENCHMARK) {
-        const matches = textModels.filter(m => {
+        const matches = allModels.filter(m => {
             const id = m.model_id.toLowerCase(), key = bm.key.toLowerCase();
             return id.includes(key) && !id.includes(key + '-mini') && !id.includes(key + '-nano');
         });
@@ -474,46 +469,29 @@ function sortAndRender() {
 function renderTable() {
     const tbody = document.getElementById('table-body');
     if (!filteredModels.length) {
-        tbody.innerHTML = `<tr><td colspan="8" style="text-align:center;padding:40px;color:var(--text-muted);">No results</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="7" style="text-align:center;padding:40px;color:var(--text-muted);">No results</td></tr>`;
         return;
     }
     const show = filteredModels.slice(0, 200);
     tbody.innerHTML = show.map(m => {
         const provCls = PROVIDER_COLORS[m.provider] || '';
-        const typeCls = TYPE_CSS[m.model_type] || 'type-text';
-        const typeLabel = t(TYPE_I18N_KEYS[m.model_type] || 'typeText');
-        const unit = m.price_unit || 'per_mtok';
-        const hasFlat = m.price_per_unit != null && m.price_per_unit > 0;
-        let inputCell, outputCell;
-        if (hasFlat) {
-            inputCell = `<td class="price ${priceClass(m.price_per_unit)}">${fmtPrice(m.price_per_unit, unit)}</td>`;
-            outputCell = `<td class="price" style="color:var(--text-muted)">--</td>`;
-        } else {
-            inputCell = `<td class="price ${priceClass(m.input_price_per_mtok)}">${fmtPrice(m.input_price_per_mtok, unit)}</td>`;
-            outputCell = `<td class="price ${priceClass(m.output_price_per_mtok)}">${fmtPrice(m.output_price_per_mtok, unit)}</td>`;
-        }
         return `<tr>
             <td class="model-name" title="${m.model_id}">${m.model_name || m.model_id}</td>
             <td><span class="provider-badge ${provCls}">${m.provider}</span></td>
-            <td><span class="type-badge ${typeCls}">${typeLabel}</span></td>
-            ${inputCell}
-            ${outputCell}
+            <td class="price ${priceClass(m.input_price_per_mtok)}">${fmtPrice(m.input_price_per_mtok)}</td>
+            <td class="price ${priceClass(m.output_price_per_mtok)}">${fmtPrice(m.output_price_per_mtok)}</td>
             <td class="latency ${latClass(m.latency_ms)}">${fmtLatency(m.latency_ms)}</td>
             <td class="uptime ${uptimeClass(m.uptime_pct)}">${fmtUptime(m.uptime_pct)}</td>
             <td class="context-badge">${fmtCtx(m.context_length)}</td>
         </tr>`;
     }).join('');
     if (filteredModels.length > 200) {
-        tbody.innerHTML += `<tr><td colspan="8" style="text-align:center;color:var(--text-muted);padding:10px;">Showing 200 of ${filteredModels.length}</td></tr>`;
+        tbody.innerHTML += `<tr><td colspan="7" style="text-align:center;color:var(--text-muted);padding:10px;">Showing 200 of ${filteredModels.length}</td></tr>`;
     }
 }
 
 function priceClass(p) { return p === 0 ? 'price-free' : p < 1 ? 'price-cheap' : p < 10 ? 'price-mid' : 'price-expensive'; }
-function fmtPrice(p, unit) {
-    if (p === 0) return 'FREE';
-    const suffix = PRICE_UNIT_SUFFIX[unit] || '/M';
-    return '$' + p.toFixed(p < 0.01 ? 4 : 2) + suffix;
-}
+function fmtPrice(p) { return p === 0 ? 'FREE' : '$' + p.toFixed(2); }
 function latClass(ms) { return ms == null ? 'latency-na' : ms < 500 ? 'latency-fast' : ms < 2000 ? 'latency-mid' : 'latency-slow'; }
 function fmtLatency(ms) { return ms == null ? '--' : ms < 1000 ? ms + 'ms' : (ms/1000).toFixed(1) + 's'; }
 function uptimeClass(u) { return u == null ? '' : u >= 99 ? 'uptime-good' : u >= 95 ? 'uptime-warn' : 'uptime-bad'; }
