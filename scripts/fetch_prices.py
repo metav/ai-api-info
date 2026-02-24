@@ -5,6 +5,7 @@ AI API 聚合器价格采集器 - MVP v0.2
 """
 
 import json
+import re
 import time
 import os
 import sqlite3
@@ -23,6 +24,12 @@ try:
 except ImportError:
     pass
 
+try:
+    from playwright.sync_api import sync_playwright
+    HAS_PLAYWRIGHT = True
+except ImportError:
+    HAS_PLAYWRIGHT = False
+
 # ============================================================
 # 配置
 # ============================================================
@@ -38,6 +45,135 @@ BENCHMARK_MODELS = [
     "llama-3.1-405b", "llama-3.1-70b", "llama-3.1-8b",
     "qwen-2.5-72b",
 ]
+
+
+# ============================================================
+# Playwright 辅助
+# ============================================================
+
+class PriceScraper:
+    """Shared browser context manager for scraping JS-rendered pricing pages."""
+
+    def __init__(self):
+        self._pw = None
+        self._browser = None
+
+    @property
+    def available(self):
+        return HAS_PLAYWRIGHT
+
+    def __enter__(self):
+        if not HAS_PLAYWRIGHT:
+            return self
+        self._pw = sync_playwright().start()
+        self._browser = self._pw.chromium.launch(headless=True)
+        return self
+
+    def __exit__(self, *exc):
+        if self._browser:
+            self._browser.close()
+        if self._pw:
+            self._pw.stop()
+
+    def get_page_content(self, url: str, wait_selector: str = None,
+                         wait_ms: int = 5000, click_load_more: bool = False) -> str:
+        """Load a URL in a browser page and return the rendered HTML."""
+        if not self._browser:
+            return ""
+        page = self._browser.new_page()
+        try:
+            page.goto(url, timeout=30000)
+            if wait_selector:
+                try:
+                    page.wait_for_selector(wait_selector, timeout=wait_ms)
+                except Exception:
+                    pass
+            page.wait_for_timeout(wait_ms)
+            if click_load_more:
+                for _ in range(20):
+                    buttons = page.query_selector_all('text=Load More')
+                    if not buttons:
+                        break
+                    for btn in buttons:
+                        try:
+                            btn.click()
+                        except Exception:
+                            pass
+                    page.wait_for_timeout(2000)
+            return page.content()
+        finally:
+            page.close()
+
+
+# ============================================================
+# 模型名称归一化
+# ============================================================
+
+def _normalize_for_match(name: str) -> str:
+    """Normalize a model name for fuzzy matching.
+
+    Strips vendor prefixes, common suffixes, date stamps,
+    and normalizes separators to produce a canonical lowercase key.
+    """
+    s = name.lower().strip()
+    # Remove known vendor prefixes (e.g. Qwen/, deepseek-ai/, meta-llama/)
+    s = re.sub(r'^[a-z0-9_-]+/', '', s)
+    # Remove common suffixes
+    for suffix in ['-instruct', '-chat', '-turbo', '-preview', '-online', '-free']:
+        s = s.replace(suffix, '')
+    # Remove date stamps like -20250514, -2025-05-14
+    s = re.sub(r'-?\d{4}-?\d{2}-?\d{2}', '', s)
+    # Normalize separators: dots, underscores -> hyphens
+    s = re.sub(r'[._]', '-', s)
+    # Collapse multiple hyphens
+    s = re.sub(r'-+', '-', s).strip('-')
+    return s
+
+
+def _match_prices_to_models(models: list[dict], scraped: dict[str, tuple],
+                            overrides: dict[str, str] = None) -> int:
+    """Match scraped (input_price, output_price) tuples to model dicts.
+
+    ``scraped`` maps scraped display name -> (input_price_per_mtok, output_price_per_mtok).
+    ``overrides`` maps model_id -> scraped display name for known mismatches.
+    Returns the number of models matched.
+    """
+    overrides = overrides or {}
+    # Build normalized lookup from scraped names
+    norm_scraped = {}
+    for display_name, prices in scraped.items():
+        norm_scraped[_normalize_for_match(display_name)] = prices
+
+    matched = 0
+    for m in models:
+        # Try explicit override first
+        if m["model_id"] in overrides:
+            key = _normalize_for_match(overrides[m["model_id"]])
+            if key in norm_scraped:
+                inp, out = norm_scraped[key]
+                m["input_price_per_mtok"] = inp
+                m["output_price_per_mtok"] = out
+                matched += 1
+                continue
+
+        # Fuzzy match on normalized model_id
+        key = _normalize_for_match(m["model_id"])
+        if key in norm_scraped:
+            inp, out = norm_scraped[key]
+            m["input_price_per_mtok"] = inp
+            m["output_price_per_mtok"] = out
+            matched += 1
+            continue
+
+        # Also try normalized model_name
+        key = _normalize_for_match(m["model_name"])
+        if key in norm_scraped:
+            inp, out = norm_scraped[key]
+            m["input_price_per_mtok"] = inp
+            m["output_price_per_mtok"] = out
+            matched += 1
+
+    return matched
 
 
 # ============================================================
@@ -181,6 +317,242 @@ class GroqCollector:
         return results
 
 
+class SiliconFlowCollector:
+    """SiliconFlow - API for model list, Playwright for pricing."""
+    name = "siliconflow"
+    API_URL = "https://api.siliconflow.com/v1/models"
+    PRICING_URL = "https://www.siliconflow.com/pricing"
+
+    def fetch_models(self, scraper: PriceScraper = None) -> list[dict]:
+        api_key = os.environ.get("SILICONFLOW_API_KEY", "")
+        if not api_key:
+            print("  ⚠️  SILICONFLOW_API_KEY not set, skipping")
+            return []
+
+        resp = requests.get(
+            self.API_URL,
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        models_data = data if isinstance(data, list) else data.get("data", [])
+
+        results = []
+        for m in models_data:
+            model_id = m.get("id", "")
+            results.append({
+                "provider": self.name,
+                "model_id": model_id,
+                "model_name": model_id,
+                "input_price_per_mtok": 0,
+                "output_price_per_mtok": 0,
+                "context_length": m.get("context_length", 0),
+                "currency": "USD",
+                "latency_ms": None,
+                "throughput_tps": None,
+                "uptime_pct": None,
+            })
+
+        # Scrape prices if Playwright is available
+        if scraper and scraper.available:
+            scraped = self._scrape_prices(scraper)
+            if scraped:
+                matched = _match_prices_to_models(results, scraped)
+                print(f"  💰 价格匹配: {matched}/{len(results)} 个模型")
+        elif not scraper or not scraper.available:
+            print("  ⚠️  Playwright not available, prices will be 0")
+
+        return results
+
+    def _scrape_prices(self, scraper: PriceScraper) -> dict[str, tuple]:
+        """Scrape pricing from SiliconFlow's Framer-rendered pricing page.
+
+        Page text nodes follow this pattern per model row:
+          ModelName, ContextSize, $, InputPrice, $, OutputPrice, Details
+        Prices are already per 1M tokens (USD).
+        """
+        print("  🌐 Scraping SiliconFlow pricing page...")
+        try:
+            html = scraper.get_page_content(
+                self.PRICING_URL, wait_ms=8000, click_load_more=True,
+            )
+            if not html:
+                return {}
+
+            from html.parser import HTMLParser
+
+            class TextExtractor(HTMLParser):
+                def __init__(self):
+                    super().__init__()
+                    self.texts = []
+
+                def handle_data(self, data):
+                    text = data.strip()
+                    if text:
+                        self.texts.append(text)
+
+            extractor = TextExtractor()
+            extractor.feed(html)
+            texts = extractor.texts
+
+            prices = {}
+
+            # Scan for pattern: ModelName, ContextSize, $, InputPrice, $, OutputPrice
+            i = 0
+            while i < len(texts) - 5:
+                # Look for "$" followed by a number, then another "$" + number
+                if (texts[i] == '$'
+                        and re.match(r'^\d+(?:\.\d+)?$', texts[i + 1])
+                        and texts[i + 2] == '$'
+                        and re.match(r'^\d+(?:\.\d+)?$', texts[i + 3])):
+                    inp = float(texts[i + 1])
+                    out = float(texts[i + 3])
+                    # Walk back to find model name (skip context size like "164K")
+                    model_name = None
+                    for j in range(i - 1, max(i - 3, -1), -1):
+                        if j >= 0 and not re.match(r'^\d+[KMB]?$', texts[j], re.IGNORECASE):
+                            model_name = texts[j]
+                            break
+                    if model_name and model_name not in ('$', 'Input', 'Output', 'Actions', 'Model Name'):
+                        prices[model_name] = (round(inp, 4), round(out, 4))
+                    i += 4
+                    continue
+                i += 1
+
+            print(f"  📋 Scraped {len(prices)} model prices from SiliconFlow")
+            return prices
+
+        except Exception as e:
+            print(f"  ❌ SiliconFlow scraping failed: {e}")
+            return {}
+
+
+class OhMyGPTCollector:
+    """OhMyGPT - API for model list, Playwright for pricing."""
+    name = "ohmygpt"
+    API_URL = "https://api.ohmygpt.com/v1/models"
+    PRICING_URL = "https://www.ohmygpt.com/models"
+
+    def fetch_models(self, scraper: PriceScraper = None) -> list[dict]:
+        api_key = os.environ.get("OHMYGPT_API_KEY", "")
+        if not api_key:
+            print("  ⚠️  OHMYGPT_API_KEY not set, skipping")
+            return []
+
+        resp = requests.get(
+            self.API_URL,
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        models_data = data if isinstance(data, list) else data.get("data", [])
+
+        results = []
+        for m in models_data:
+            model_id = m.get("id", "")
+            results.append({
+                "provider": self.name,
+                "model_id": model_id,
+                "model_name": model_id,
+                "input_price_per_mtok": 0,
+                "output_price_per_mtok": 0,
+                "context_length": m.get("context_length", 0),
+                "currency": "USD",
+                "latency_ms": None,
+                "throughput_tps": None,
+                "uptime_pct": None,
+            })
+
+        # Scrape prices if Playwright is available
+        if scraper and scraper.available:
+            scraped = self._scrape_prices(scraper)
+            if scraped:
+                matched = _match_prices_to_models(results, scraped)
+                print(f"  💰 价格匹配: {matched}/{len(results)} 个模型")
+        elif not scraper or not scraper.available:
+            print("  ⚠️  Playwright not available, prices will be 0")
+
+        return results
+
+    def _scrape_prices(self, scraper: PriceScraper) -> dict[str, tuple]:
+        """Scrape pricing from OhMyGPT's Next.js-rendered models page.
+
+        Page text nodes follow this pattern per model card:
+          DisplayName, model-id, $INPUT, /, $OUTPUT, /M, ctx, SIZE, ...
+        Prices are split across separate text nodes.
+        """
+        print("  🌐 Scraping OhMyGPT pricing page...")
+        try:
+            html = scraper.get_page_content(self.PRICING_URL, wait_ms=8000)
+            if not html:
+                return {}
+
+            prices = {}
+
+            from html.parser import HTMLParser
+
+            class TextExtractor(HTMLParser):
+                def __init__(self):
+                    super().__init__()
+                    self.texts = []
+
+                def handle_data(self, data):
+                    text = data.strip()
+                    if text:
+                        self.texts.append(text)
+
+            extractor = TextExtractor()
+            extractor.feed(html)
+            texts = extractor.texts
+
+            # Scan for pattern: model_id, $INPUT, /, $OUTPUT, /M
+            i = 0
+            while i < len(texts) - 4:
+                text = texts[i]
+                # Model IDs: lowercase with hyphens/dots/slashes, e.g. "gpt-5.1", "claude-sonnet-4-6"
+                if (re.match(r'^[a-z][a-z0-9._/-]+$', text)
+                        and len(text) > 3
+                        and i + 4 < len(texts)
+                        and re.match(r'^\$[\d.]+$', texts[i + 1])
+                        and texts[i + 2] == '/'
+                        and re.match(r'^\$[\d.]+$', texts[i + 3])
+                        and texts[i + 4] == '/M'):
+                    model_id = text
+                    inp = float(texts[i + 1][1:])  # strip $
+                    out = float(texts[i + 3][1:])  # strip $
+                    # Check for ¥ (CNY) — convert to USD
+                    if texts[i + 1].startswith('¥') or texts[i + 3].startswith('¥'):
+                        inp *= 0.14
+                        out *= 0.14
+                    prices[model_id] = (round(inp, 4), round(out, 4))
+                    i += 5
+                    continue
+                # Also handle ¥ prices
+                if (re.match(r'^[a-z][a-z0-9._/-]+$', text)
+                        and len(text) > 3
+                        and i + 4 < len(texts)
+                        and re.match(r'^[¥][\d.]+$', texts[i + 1])
+                        and texts[i + 2] == '/'
+                        and re.match(r'^[¥][\d.]+$', texts[i + 3])
+                        and texts[i + 4] == '/M'):
+                    model_id = text
+                    inp = float(texts[i + 1][1:]) * 0.14
+                    out = float(texts[i + 3][1:]) * 0.14
+                    prices[model_id] = (round(inp, 4), round(out, 4))
+                    i += 5
+                    continue
+                i += 1
+
+            print(f"  📋 Scraped {len(prices)} model prices from OhMyGPT")
+            return prices
+
+        except Exception as e:
+            print(f"  ❌ OhMyGPT scraping failed: {e}")
+            return {}
+
+
 # ============================================================
 # 数据存储
 # ============================================================
@@ -237,16 +609,20 @@ def main():
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--skip-latency", action="store_true", help="Skip latency enrichment (faster)")
+    parser.add_argument("--skip-scraping", action="store_true", help="Skip Playwright-based price scraping")
     args = parser.parse_args()
 
-    print("🚀 AI API 聚合器价格采集器 v0.2")
+    print("🚀 AI API 聚合器价格采集器 v0.3")
     print("=" * 50)
 
     or_collector = OpenRouterCollector()
-    collectors = [or_collector, TogetherAICollector(), GroqCollector()]
+    api_collectors = [or_collector, TogetherAICollector(), GroqCollector()]
+    scraping_collectors = [SiliconFlowCollector(), OhMyGPTCollector()]
 
     all_models = []
-    for collector in collectors:
+
+    # API-only collectors (no scraper needed)
+    for collector in api_collectors:
         print(f"\n📡 采集 {collector.name}...")
         try:
             models = collector.fetch_models()
@@ -254,6 +630,31 @@ def main():
             all_models.extend(models)
         except Exception as e:
             print(f"  ❌ 采集失败: {e}")
+
+    # Scraping collectors (shared browser instance)
+    if not args.skip_scraping:
+        with PriceScraper() as scraper:
+            if not scraper.available:
+                print("\n⚠️  Playwright not installed — scraping collectors will have price=0")
+                print("   Install with: pip install playwright && playwright install chromium")
+            for collector in scraping_collectors:
+                print(f"\n📡 采集 {collector.name}...")
+                try:
+                    models = collector.fetch_models(scraper=scraper)
+                    print(f"  ✅ 获取到 {len(models)} 个模型")
+                    all_models.extend(models)
+                except Exception as e:
+                    print(f"  ❌ 采集失败: {e}")
+    else:
+        print("\n⏭️  Skipping scraping collectors (--skip-scraping)")
+        for collector in scraping_collectors:
+            print(f"\n📡 采集 {collector.name} (no scraping)...")
+            try:
+                models = collector.fetch_models(scraper=None)
+                print(f"  ✅ 获取到 {len(models)} 个模型")
+                all_models.extend(models)
+            except Exception as e:
+                print(f"  ❌ 采集失败: {e}")
 
     # Enrich latency for OpenRouter
     if not args.skip_latency:
