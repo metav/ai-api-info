@@ -46,6 +46,29 @@ BENCHMARK_MODELS = [
     "qwen-2.5-72b",
 ]
 
+# Model type inference patterns (checked against lowercased model_id)
+_MODEL_TYPE_PATTERNS = {
+    "image-gen": [
+        "flux", "dall-e", "stable-diff", "sdxl", "imagen", "gpt-image",
+        "playground-v", "kandinsky", "ssd-1b",
+    ],
+    "video-gen": ["veo", "wan", "video-01", "kling", "hunyuan-video"],
+    "audio-speech": ["tts-", "cosyvoice", "fish-speech", "indextts"],
+    "audio-transcription": ["whisper", "distil-whisper"],
+    "embedding": ["embed", "bge-", "e5-", "gte-"],
+    "rerank": ["rerank"],
+}
+
+
+def infer_model_type(model_id: str) -> str:
+    """Infer model type from model ID using keyword patterns."""
+    lower = model_id.lower()
+    for mtype, patterns in _MODEL_TYPE_PATTERNS.items():
+        for pat in patterns:
+            if pat in lower:
+                return mtype
+    return "text"
+
 
 # ============================================================
 # Playwright 辅助
@@ -186,6 +209,47 @@ class OpenRouterCollector:
     MODELS_URL = "https://openrouter.ai/api/v1/models"
     ENDPOINTS_URL = "https://openrouter.ai/api/v1/models/{model_id}/endpoints"
 
+    @staticmethod
+    def _detect_type(m: dict) -> tuple[str, str, float | None]:
+        """Detect model_type, price_unit, price_per_unit from OpenRouter model data."""
+        modality = m.get("architecture", {}).get("modality", "")
+        pricing = m.get("pricing", {})
+        model_id = m.get("id", "").lower()
+
+        # Image generation: output includes image
+        if "->image" in modality or "->text+image" in modality:
+            image_price = float(pricing.get("image", 0))
+            if image_price > 0:
+                return "image-gen", "per_image", image_price
+            return "image-gen", "per_image", None
+
+        # Vision models: input accepts image, output is text
+        if "->" in modality and "image" in modality.split("->")[0]:
+            return "text-vision", "per_mtok", None
+
+        # Audio output (speech)
+        if "->audio" in modality:
+            audio_price = float(pricing.get("audio", 0))
+            if audio_price > 0:
+                return "audio-speech", "per_mchar", audio_price
+            return "audio-speech", "per_mchar", None
+
+        # Audio input (transcription)
+        if "->" in modality and "audio" in modality.split("->")[0]:
+            return "audio-transcription", "per_mtok", None
+
+        # Fall back to keyword inference
+        inferred = infer_model_type(model_id)
+        if inferred != "text":
+            unit_map = {
+                "image-gen": "per_image", "video-gen": "per_second",
+                "audio-speech": "per_mchar", "audio-transcription": "per_minute",
+                "embedding": "per_mtok", "rerank": "per_mtok",
+            }
+            return inferred, unit_map.get(inferred, "per_mtok"), None
+
+        return "text", "per_mtok", None
+
     def fetch_models(self) -> list[dict]:
         resp = requests.get(self.MODELS_URL, timeout=30)
         resp.raise_for_status()
@@ -195,6 +259,7 @@ class OpenRouterCollector:
             pricing = m.get("pricing", {})
             input_price = float(pricing.get("prompt", 0)) * 1_000_000
             output_price = float(pricing.get("completion", 0)) * 1_000_000
+            model_type, price_unit, price_per_unit = self._detect_type(m)
             results.append({
                 "provider": self.name,
                 "model_id": m["id"],
@@ -206,6 +271,9 @@ class OpenRouterCollector:
                 "latency_ms": None,
                 "throughput_tps": None,
                 "uptime_pct": None,
+                "model_type": model_type,
+                "price_unit": price_unit,
+                "price_per_unit": price_per_unit,
             })
         return results
 
@@ -245,8 +313,8 @@ class OpenRouterCollector:
                     m["throughput_tps"] = round(max(throughputs), 1)
                 if uptimes:
                     m["uptime_pct"] = round(max(uptimes), 2)
-                
-                if latencies or throughputs:
+
+                if latencies or throughputs or uptimes:
                     enriched += 1
                 
                 time.sleep(0.1)  # Rate limit
@@ -261,6 +329,12 @@ class TogetherAICollector:
     name = "together_ai"
     API_URL = "https://api.together.xyz/v1/models"
 
+    _TYPE_MAP = {
+        "chat": "text", "language": "text", "code": "text",
+        "image": "image-gen", "embedding": "embedding", "rerank": "rerank",
+        "moderation": "text",
+    }
+
     def fetch_models(self) -> list[dict]:
         api_key = os.environ.get("TOGETHER_API_KEY", "")
         if not api_key:
@@ -274,17 +348,36 @@ class TogetherAICollector:
             pricing = m.get("pricing", {})
             if not pricing:
                 continue
+            model_id = m.get("id", "")
+            api_type = m.get("type", "")
+            model_type = self._TYPE_MAP.get(api_type, infer_model_type(model_id))
+
+            price_unit = "per_mtok"
+            price_per_unit = None
+            input_price = float(pricing.get("input", 0)) * 1_000_000
+            output_price = float(pricing.get("output", 0)) * 1_000_000
+
+            # Image models use per-megapixel pricing
+            if model_type == "image-gen":
+                image_price = float(pricing.get("image", 0))
+                if image_price > 0:
+                    price_unit = "per_megapixel"
+                    price_per_unit = image_price
+
             results.append({
                 "provider": self.name,
-                "model_id": m.get("id", ""),
-                "model_name": m.get("display_name", m.get("id", "")),
-                "input_price_per_mtok": float(pricing.get("input", 0)) * 1_000_000,
-                "output_price_per_mtok": float(pricing.get("output", 0)) * 1_000_000,
+                "model_id": model_id,
+                "model_name": m.get("display_name", model_id),
+                "input_price_per_mtok": input_price,
+                "output_price_per_mtok": output_price,
                 "context_length": m.get("context_length", 0),
                 "currency": "USD",
                 "latency_ms": None,
                 "throughput_tps": None,
                 "uptime_pct": None,
+                "model_type": model_type,
+                "price_unit": price_unit,
+                "price_per_unit": price_per_unit,
             })
         return results
 
@@ -302,10 +395,13 @@ class GroqCollector:
         resp.raise_for_status()
         results = []
         for m in resp.json().get("data", []):
+            model_id = m["id"]
+            model_type = infer_model_type(model_id)
+            price_unit = "per_minute" if model_type == "audio-transcription" else "per_mtok"
             results.append({
                 "provider": self.name,
-                "model_id": m["id"],
-                "model_name": m.get("id", ""),
+                "model_id": model_id,
+                "model_name": model_id,
                 "input_price_per_mtok": 0,
                 "output_price_per_mtok": 0,
                 "context_length": m.get("context_window", 0),
@@ -313,6 +409,9 @@ class GroqCollector:
                 "latency_ms": None,
                 "throughput_tps": None,
                 "uptime_pct": None,
+                "model_type": model_type,
+                "price_unit": price_unit,
+                "price_per_unit": None,
             })
         return results
 
@@ -341,6 +440,13 @@ class SiliconFlowCollector:
         results = []
         for m in models_data:
             model_id = m.get("id", "")
+            model_type = infer_model_type(model_id)
+            unit_map = {
+                "image-gen": "per_image", "video-gen": "per_second",
+                "audio-speech": "per_mchar", "audio-transcription": "per_minute",
+                "embedding": "per_mtok", "rerank": "per_mtok",
+            }
+            price_unit = unit_map.get(model_type, "per_mtok")
             results.append({
                 "provider": self.name,
                 "model_id": model_id,
@@ -352,6 +458,9 @@ class SiliconFlowCollector:
                 "latency_ms": None,
                 "throughput_tps": None,
                 "uptime_pct": None,
+                "model_type": model_type,
+                "price_unit": price_unit,
+                "price_per_unit": None,
             })
 
         # Scrape prices if Playwright is available
@@ -452,6 +561,13 @@ class OhMyGPTCollector:
         results = []
         for m in models_data:
             model_id = m.get("id", "")
+            model_type = infer_model_type(model_id)
+            unit_map = {
+                "image-gen": "per_image", "video-gen": "per_second",
+                "audio-speech": "per_mchar", "audio-transcription": "per_minute",
+                "embedding": "per_mtok", "rerank": "per_mtok",
+            }
+            price_unit = unit_map.get(model_type, "per_mtok")
             results.append({
                 "provider": self.name,
                 "model_id": model_id,
@@ -463,6 +579,9 @@ class OhMyGPTCollector:
                 "latency_ms": None,
                 "throughput_tps": None,
                 "uptime_pct": None,
+                "model_type": model_type,
+                "price_unit": price_unit,
+                "price_per_unit": None,
             })
 
         # Scrape prices if Playwright is available
@@ -580,6 +699,15 @@ def init_db(db_path: Path):
         CREATE INDEX IF NOT EXISTS idx_provider_model_time
         ON price_snapshots(provider, model_id, timestamp)
     """)
+    # Migrate: add multi-modal columns
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(price_snapshots)")}
+    for col, typedef in [
+        ("model_type", "TEXT DEFAULT 'text'"),
+        ("price_unit", "TEXT DEFAULT 'per_mtok'"),
+        ("price_per_unit", "REAL"),
+    ]:
+        if col not in existing:
+            conn.execute(f"ALTER TABLE price_snapshots ADD COLUMN {col} {typedef}")
     conn.commit()
     return conn
 
@@ -590,13 +718,16 @@ def save_snapshot(conn, models):
         conn.execute("""
             INSERT INTO price_snapshots
             (timestamp, provider, model_id, model_name, input_price_per_mtok,
-             output_price_per_mtok, context_length, currency, latency_ms, throughput_tps, uptime_pct)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             output_price_per_mtok, context_length, currency, latency_ms, throughput_tps, uptime_pct,
+             model_type, price_unit, price_per_unit)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             ts, m["provider"], m["model_id"], m["model_name"],
             m["input_price_per_mtok"], m["output_price_per_mtok"],
             m["context_length"], m["currency"],
-            m.get("latency_ms"), m.get("throughput_tps"), m.get("uptime_pct")
+            m.get("latency_ms"), m.get("throughput_tps"), m.get("uptime_pct"),
+            m.get("model_type", "text"), m.get("price_unit", "per_mtok"),
+            m.get("price_per_unit"),
         ))
     conn.commit()
 
@@ -662,7 +793,13 @@ def main():
 
     print(f"\n📊 总计采集 {len(all_models)} 个模型")
     lat_count = sum(1 for m in all_models if m.get("latency_ms") is not None)
-    print(f"   其中 {lat_count} 个有延迟数据")
+    upt_count = sum(1 for m in all_models if m.get("uptime_pct") is not None)
+    type_counts = {}
+    for m in all_models:
+        mt = m.get("model_type", "text")
+        type_counts[mt] = type_counts.get(mt, 0) + 1
+    print(f"   延迟数据: {lat_count}, 可用率数据: {upt_count}")
+    print(f"   类型分布: {', '.join(f'{k}={v}' for k, v in sorted(type_counts.items(), key=lambda x: -x[1]))}")
 
     # Save
     conn = init_db(DB_PATH)

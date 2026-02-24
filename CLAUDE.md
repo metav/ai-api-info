@@ -43,7 +43,9 @@ pip install playwright && playwright install chromium
 
 **Collector pattern:** Each provider has a class (e.g., `OpenRouterCollector`, `TogetherAICollector`) with a `fetch_models()` method returning a normalized list of dicts. OpenRouter additionally has `enrich_latency()` for performance metrics via its endpoints API. SiliconFlow and OhMyGPT collectors accept an optional `scraper` kwarg for Playwright-based price scraping.
 
-**Pricing normalization:** All prices are converted to USD per million tokens. OpenRouter's API returns per-token prices (multiplied by 1M), Together AI returns per-token prices similarly.
+**Pricing normalization:** Text model prices are USD per million tokens. Non-text models use `price_unit` to indicate the unit: `per_mtok`, `per_image`, `per_megapixel`, `per_second`, `per_mchar`, `per_minute`. Models with a single flat price use `price_per_unit` instead of input/output split.
+
+**Model types:** Each model has a `model_type` field: `text`, `text-vision`, `image-gen`, `video-gen`, `audio-speech`, `audio-transcription`, `embedding`, `rerank`. Type is inferred from API metadata (OpenRouter modality, Together AI type) or keyword patterns in `infer_model_type()`.
 
 **Frontend:** Single-file vanilla HTML/CSS/JS app (`web/index.html`) — no build step, no framework. Loads `./data/latest_prices.json` (symlinked from `../data`). Features i18n (Chinese/English), filtering, sorting, and benchmark comparison.
 
